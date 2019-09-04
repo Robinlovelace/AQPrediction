@@ -1,0 +1,192 @@
+---
+output: github_document
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+# AQPrediction
+
+<!-- badges: start -->
+<!-- badges: end -->
+
+The goal of this repo is to demonstrate spatio-temporal prediction models to estimate levels of air pollution.
+
+The input dataset is an Excel [file](https://drive.google.com/open?id=14GvlMCBLR9FQ_BsCeg0tj-pb1AadXr3G3gKPnrfm8gg) provided as part of the [OpenGeoHub Summer School 2019](https://opengeohub.org/summer_school_2019).
+
+We'll use these packages
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(sf)
+  library(ranger)
+  library (CAST)
+  library(caret)
+})
+```
+
+And read-in the input data as follows
+
+```{r, warning=FALSE, message=FALSE}
+train = readxl::read_excel("SpatialPrediction.xlsx", sheet = 1)
+covar = readxl::read_excel("SpatialPrediction.xlsx", sheet = 2)
+locat = readxl::read_excel("SpatialPrediction.xlsx", sheet = 3)
+# times = readxl::read_excel("SpatialPrediction.xlsx", sheet = 4) # what is this? -->Their test set. They will use to check our model
+targt = readxl::read_excel("SpatialPrediction.xlsx", sheet = 5)
+
+```
+
+The objective is to fill the NA values in the `targt` data:
+
+```{r}
+targt[1:3]
+```
+
+Let's do some data cleaning and plot the data:
+
+```{r}
+d = inner_join(train, covar)
+d = inner_join(d, locat)
+
+class(d$time)
+d$dow = weekdays.POSIXt(d$time)
+# d$hour =  ??? (d$time) # do you remember how to extract the hour??
+head(d)
+nrow(d)
+
+dsf = sf::st_as_sf(d, coords = c("X", "Y"), crs = 4326)
+summary(dsf)
+mapview::mapview(dsf %>% sample_n(1000))
+```
+
+A simple model:
+
+```{r}
+##\\LINEAR//##
+m = lm(PM10 ~ humidity + temperature, data = d)
+p = predict(object = m, newdata = d)
+plot(d$PM10, p)
+cor(d$PM10, p)^2
+################
+```
+
+A simple linear model can explain ~3% of the variability in PM10 levels, not great!
+
+
+
+Lat and long are also predictors, but work as an interaction X*Y
+We can check if day of the week, just day or hour are valuable predictors, but working as.factor(day) in the regression.
+
+Lets try a fancy model. Random Forest
+
+```{r}
+################
+## FORMULA ##
+formula = as.formula(PM10 ~ humidity + temperature + (X*Y))
+
+#####################
+##\\RANDOM FOREST//##
+#####################
+tunegrid = expand.grid(.mtry=c(3), .splitrule = "variance", .min.node.size = c(5))
+#@ mtry = 3 (Number of variables to possibly split at in each node. Default is the (rounded down) square root of the number variables).
+#@ min.node.size = 5  (Minimal node size. Default 1 for classification, 5 for regression, 3 for survival, and 10 for probability).
+#@ splitrule = variance (Splitting rule. For regression "variance", "extratrees" or "maxstat" with default "variance").
+
+#RANDOM CV
+ranger.model = caret::train (formula, 
+                                data= d, 
+                                method="ranger", 
+                                metric="RMSE",
+                                num.trees = 50,
+                                tuneGrid=tunegrid, 
+                                trControl=trainControl(method="cv", number=10, 
+                                                      allowParallel=TRUE, verboseIter=TRUE))  
+ranger.model
+
+#SPACE CV
+space.cv = CreateSpacetimeFolds(d, spacevar = "id")
+  
+ranger.space = caret::train (formula, 
+                                data= d, 
+                                method="ranger", 
+                                metric="RMSE",
+                                num.trees = 50,
+                                tuneGrid=tunegrid,
+                                trControl=trainControl(method="cv", index = space.cv$index,
+                                                      number=10, allowParallel = TRUE))
+ranger.space 
+space.df = d
+space.df$pred = predict(ranger.space, space.df)
+lm.space = lm(PM10 ~ pred, data=space.df)
+summary(lm.space)
+
+#\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+#TIME CV
+time.cv = CreateSpacetimeFolds(d, spacevar = "time")
+  
+ranger.time = caret::train (formula, 
+                                data= d, 
+                                method="ranger", 
+                                metric="RMSE",
+                                num.trees = 50,
+                                tuneGrid=tunegrid,
+                                trControl=trainControl(method="cv", index = time.cv$index,
+                                                      number=10, allowParallel = TRUE))
+                                                      
+ranger.time
+time.df = d
+time.df$pred = predict(ranger.time, time.df)
+lm.time = lm(PM10 ~ pred, data=time.df)
+summary(lm.time)
+
+#\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+#SPACE-TIME CV
+spacetime.cv = CreateSpacetimeFolds(d, spacevar = "id",timevar ="time")
+  
+ranger.spacetime = caret::train (formula, 
+                                data= d, 
+                                method="ranger", 
+                                metric="RMSE",
+                                num.trees = 50,
+                                tuneGrid=tunegrid,
+                                trControl=trainControl(method="cv", index = spacetime.cv$index,
+                                                      number=10, allowParallel = TRUE))
+                                                      
+ranger.spacetime
+spacetime.df = d
+spacetime.df$pred = predict(ranger.spacetime, spacetime.df)
+lm.spacetime = lm(PM10 ~ pred, data=spacetime.df)
+summary(lm.spacetime)
+```
+
+To get the result let's see what is in the target table:
+
+```{r}
+targt_joined = inner_join(targt, locat)
+targt_joined = inner_join(targt_joined, covar)
+summary(targt_joined)
+summary(targt$id %in% d$id)
+summary(targt$id %in% covar$id)
+summary(targt$id %in% locat$id)
+```
+
+Now we can predict the missing values:
+
+```{r}
+p = predict(ranger.spacetime, newdata = targt_joined)
+summary(p)
+write.csv(data)
+```
+
+```{r, echo=FALSE}
+# system.time(x = 1:1e9)
+# system.time({x = 1:1e9})
+```
+
