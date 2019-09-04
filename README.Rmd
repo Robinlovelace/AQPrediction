@@ -182,7 +182,7 @@ Now we can predict the missing values:
 ```{r}
 p = predict(ranger.spacetime, newdata = targt_joined)
 summary(p)
-write.csv(data)
+write.csv(data.frame(p = p), "p.csv")
 ```
 
 ```{r, echo=FALSE}
