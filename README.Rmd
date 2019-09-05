@@ -29,7 +29,9 @@ suppressPackageStartupMessages({
   library(ranger)
   library (CAST)
   library(caret)
+  library(tmap)
 })
+tmap_mode("view")
 ```
 
 And read-in the input data as follows
@@ -40,7 +42,7 @@ covar = readxl::read_excel("SpatialPrediction.xlsx", sheet = 2)
 locat = readxl::read_excel("SpatialPrediction.xlsx", sheet = 3)
 # times = readxl::read_excel("SpatialPrediction.xlsx", sheet = 4) # what is this? -->Their test set. They will use to check our model
 targt = readxl::read_excel("SpatialPrediction.xlsx", sheet = 5)
-wind = readRDS ("https://github.com/Robinlovelace/AQPredict2/blob/master/ERA5_24h_uvWind_precip.RDS") ## CHECK if the path is correct.
+wind = readRDS ("ERA5_24h_uvWind_precip.RDS") ## CHECK if the path is correct.
 ```
 
 The objective is to fill the NA values in the `targt` data:
@@ -188,6 +190,67 @@ summary(targt$id %in% covar$id)
 summary(targt$id %in% locat$id)
 summary(targt$id %in% wind$monitors.id)
 ```
+
+## Add roads
+
+```{r}
+bb = st_bbox(dsf)
+
+```
+
+See www.osm.org for major roads
+
+```{r, eval=FALSE}
+# library(osmdata)
+# osm_data = opq(bbox = bb) %>% 
+#   add_osm_feature(key = "highway", value = "motorway") %>% 
+#   osmdata_sf()
+download.file("http://download.geofabrik.de/europe/germany/nordrhein-westfalen-latest-free.shp.zip", "roads.zip")
+unzip("roads.zip")
+# osm_westfalen_traffic = sf::read_sf("gis_osm_traffic_a_free_1.shp")
+osm_westfalen_transport = sf::read_sf("gis_osm_roads_free_1.shp")
+osm_westfalen_transport
+mapview::mapview(osm_westfalen[1:999, ])
+saveRDS(osm_westfalen_transport, "roads-all.Rds")
+table(osm_westfalen_transport$fclass)
+roads_big = osm_westfalen_transport %>% 
+  filter(grepl(pattern = "motorway|primary|trunk|second|resi", fclass))
+mapview::mapview(roads_big %>% sample_n(100)) +
+  mapview::mapview(dsf %>% sample_n(100))
+saveRDS(roads_big, "roads_big.Rds")
+```
+
+```{r}
+roads_big = readRDS("roads_big.Rds")
+table(roads_big$fclass)
+roads_big_class = roads_big %>% 
+  mutate(class = case_when(
+    grepl(pattern = "moto", fclass) ~ 4,
+    grepl(pattern = "prim", fclass) ~ 3,
+    grepl(pattern = "trunk", fclass) ~ 2,
+    grepl(pattern = "sec", fclass) ~ 1,
+    grepl(pattern = "resi", fclass) ~ 0,
+    )) %>% 
+  select(class, maxspeed)
+tm_shape(roads_big_class[1:999, ]) + tm_lines("class") 
+```
+
+Add to point training data
+
+```{r}
+names(d)
+nrow(d) == nrow(dsf)
+d_buff = stplanr::geo_projected(dsf, sf::st_buffer, dist = 500)
+plot(d_buff[1:5, ])
+d_buff_main = aggregate()
+```
+
+
+
+
+## Prediction
+
+
 Now we can predict the missing values:
 
 ```{r}
