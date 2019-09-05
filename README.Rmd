@@ -40,7 +40,7 @@ covar = readxl::read_excel("SpatialPrediction.xlsx", sheet = 2)
 locat = readxl::read_excel("SpatialPrediction.xlsx", sheet = 3)
 # times = readxl::read_excel("SpatialPrediction.xlsx", sheet = 4) # what is this? -->Their test set. They will use to check our model
 targt = readxl::read_excel("SpatialPrediction.xlsx", sheet = 5)
-
+wind = readRDS ("https://github.com/Robinlovelace/AQPredict2/blob/master/ERA5_24h_uvWind_precip.RDS") ## CHECK if the path is correct.
 ```
 
 The objective is to fill the NA values in the `targt` data:
@@ -54,52 +54,50 @@ Let's do some data cleaning and plot the data:
 ```{r}
 d = inner_join(train, covar)
 d = inner_join(d, locat)
-
+d = merge(d, wind, by.x=c("id", "time"), by.y=c("monitors.id", "date")) ### inner_join to join using two columns????
 class(d$time)
-d$dow = weekdays.POSIXt(d$time)
-# d$hour =  ??? (d$time) # do you remember how to extract the hour??
-head(d)
-nrow(d)
+d$dow  <- weekdays.POSIXt(d$time) # I included in the wind file
+d$hour <- hour(d$time) # I included in the wind file
+head(d); nrow(d)
 
 dsf = sf::st_as_sf(d, coords = c("X", "Y"), crs = 4326)
 summary(dsf)
 mapview::mapview(dsf %>% sample_n(1000))
 ```
 
+```{r}
+## FORMULA ##
+formula = as.formula(PM10 ~  humidity + temperature + (X*Y) + u10 + v10 + tp + dow + hour)
+```
 A simple model:
 
 ```{r}
 ##\\LINEAR//##
-m = lm(PM10 ~ humidity + temperature, data = d)
-p = predict(object = m, newdata = d)
-plot(d$PM10, p)
-cor(d$PM10, p)^2
-################
+m = lm(formula, data = d)
+## Are all the predictors significant? Let's check!
+summary(m)
+
+lm.df = d
+lm.df$pred = predict(m, newdata = lm.df)
+lm.random = lm(PM10 ~ pred, data=lm.df)
+summary(lm.random)
+plot(lm.df$PM10, lm.df$pred)
+cor(lm.df$PM10, lm.df$pred)^2
 ```
+A simple linear model can explain ~19% of the variability in PM10 levels, not great!
 
-A simple linear model can explain ~3% of the variability in PM10 levels, not great!
-
-
-
-Lat and long are also predictors, but work as an interaction X*Y
-We can check if day of the week, just day or hour are valuable predictors, but working as.factor(day) in the regression.
-
-Lets try a fancy model. Random Forest
+Lets try a fancy model: Random Forest
 
 ```{r}
-################
-## FORMULA ##
-formula = as.formula(PM10 ~ humidity + temperature + (X*Y))
-
-#####################
 ##\\RANDOM FOREST//##
-#####################
+
 tunegrid = expand.grid(.mtry=c(3), .splitrule = "variance", .min.node.size = c(5))
+
 #@ mtry = 3 (Number of variables to possibly split at in each node. Default is the (rounded down) square root of the number variables).
 #@ min.node.size = 5  (Minimal node size. Default 1 for classification, 5 for regression, 3 for survival, and 10 for probability).
 #@ splitrule = variance (Splitting rule. For regression "variance", "extratrees" or "maxstat" with default "variance").
 
-#RANDOM CV
+## CV TYPE RANDOM
 ranger.model = caret::train (formula, 
                                 data= d, 
                                 method="ranger", 
@@ -107,10 +105,12 @@ ranger.model = caret::train (formula,
                                 num.trees = 50,
                                 tuneGrid=tunegrid, 
                                 trControl=trainControl(method="cv", number=10, 
-                                                      allowParallel=TRUE, verboseIter=TRUE))  
+                                                      allowParallel=TRUE))  
 ranger.model
+#  RMSE     Rsquared  MAE     
+#5.989361  0.882534  3.577604
 
-#SPACE CV
+## CV TYPE SPACE
 space.cv = CreateSpacetimeFolds(d, spacevar = "id")
   
 ranger.space = caret::train (formula, 
@@ -121,14 +121,18 @@ ranger.space = caret::train (formula,
                                 tuneGrid=tunegrid,
                                 trControl=trainControl(method="cv", index = space.cv$index,
                                                       number=10, allowParallel = TRUE))
+
 ranger.space 
+#  RMSE     Rsquared   MAE     
+#11.58011  0.5467433  7.581717
+
 space.df = d
 space.df$pred = predict(ranger.space, space.df)
 lm.space = lm(PM10 ~ pred, data=space.df)
 summary(lm.space)
 
-#\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
-#TIME CV
+
+##CV TYPE TIME
 time.cv = CreateSpacetimeFolds(d, spacevar = "time")
   
 ranger.time = caret::train (formula, 
@@ -141,13 +145,15 @@ ranger.time = caret::train (formula,
                                                       number=10, allowParallel = TRUE))
                                                       
 ranger.time
+#  RMSE      Rsquared   MAE     
+# 6.277938  0.8732086  3.874261
+
 time.df = d
 time.df$pred = predict(ranger.time, time.df)
 lm.time = lm(PM10 ~ pred, data=time.df)
 summary(lm.time)
 
-#\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
-#SPACE-TIME CV
+## CV TYPE SPACE-TIME 
 spacetime.cv = CreateSpacetimeFolds(d, spacevar = "id",timevar ="time")
   
 ranger.spacetime = caret::train (formula, 
@@ -160,6 +166,9 @@ ranger.spacetime = caret::train (formula,
                                                       number=10, allowParallel = TRUE))
                                                       
 ranger.spacetime
+#  RMSE      Rsquared   MAE     
+# 9.591133  0.6802324  5.760715
+
 spacetime.df = d
 spacetime.df$pred = predict(ranger.spacetime, spacetime.df)
 lm.spacetime = lm(PM10 ~ pred, data=spacetime.df)
@@ -171,12 +180,14 @@ To get the result let's see what is in the target table:
 ```{r}
 targt_joined = inner_join(targt, locat)
 targt_joined = inner_join(targt_joined, covar)
+targt_joined = merge(targt_joined, wind, by.x=c("id", "time"), by.y=c("monitors.id", "date")) ## inner_join to join using two columns????
+
 summary(targt_joined)
 summary(targt$id %in% d$id)
 summary(targt$id %in% covar$id)
 summary(targt$id %in% locat$id)
+summary(targt$id %in% wind$monitors.id)
 ```
-
 Now we can predict the missing values:
 
 ```{r}
