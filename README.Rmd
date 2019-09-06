@@ -62,15 +62,96 @@ d$dow  <- weekdays.POSIXt(d$time) # I included in the wind file
 d$hour <- hour(d$time) # I included in the wind file
 head(d); nrow(d)
 
-dsf = sf::st_as_sf(d, coords = c("X", "Y"), crs = 4326)
-summary(dsf)
-mapview::mapview(dsf %>% sample_n(1000))
+# dsf = sf::st_as_sf(d, coords = c("X", "Y"), crs = 4326) # ducplicated geometries
+locat_sf = st_as_sf(locat, coords = c("X", "Y"), crs = 4326)
+summary(locat_sf)
+mapview::mapview(locat_sf)
 ```
+
+## Exploratory anaysis
+
+How many points in the target are in the training data?
+
+```{r}
+nrow(locat)
+length(unique(d$id))
+length(unique(targt$id))
+summary(targt$id %in% d$id)
+# targt_locat = inner_join(targt, locat)
+# targt_sf = st_as_sf(targt_joined, coords = c("X", "Y"))
+
+nrow(locat_sf)
+locat_sf$is_target = locat_sf$id %in% targt$id
+tm_shape(locat_sf) + tm_dots("is_target") + tm_scale_bar()
+locat_sf_training = locat_sf %>% filter(!is_target)
+locat_sf_targt = locat_sf %>% filter(is_target)
+
+# identify points in close proximity in training dataset
+d_distance_matrix = st_distance(locat_sf_training)
+d_distance_matrix = apply(d_distance_matrix, 1, as.numeric)
+summary(d_distance_matrix[1, ])
+d_distance_matrix[d_distance_matrix == 0] = NA
+mins1 = apply(d_distance_matrix, 1, min, na.rm = TRUE)
+# which_mins1 = apply(d_distance_matrix, 1, which.min)
+# ids_min = locat_sf_training$id[which_mins1]
+d_nearest_training = st_nearest_feature(locat_sf_training, locat_sf_training)
+
+
+
+# test it with random point: 5
+nearest_to_5 = locat_sf_training %>% filter(id == ids_min[9])
+nearest_to_5_and_5 = rbind(locat_sf_training[5, ], nearest_to_5)
+tm_shape(nearest_to_5_and_5) + tm_dots() +
+  tm_shape(locat_sf_training) + tm_dots(col = "red") +
+  tm_shape(nearest_to_5_and_5) + tm_dots() 
+
+mins_training_target = st_distance(locat_sf_training)
+min1_1 = which.min(mins1)
+# which.min(d_distance_matrix)
+
+min1_2 = which.min(d_distance_matrix[min1_1, ])
+locat_sf_training_min1 = locat_sf_training %>% 
+  slice(c(min1_1, min1_2))
+mapview::mapview(locat_sf_training_min1)
+
+# check similarity
+d_pair1 = d %>% 
+  filter(id %in% locat_sf_training_min1$id)
+
+d_pair1 %>% 
+  ggplot() +
+  geom_line(aes(time, PM10, col = id)) # omg they are the same!
+
+d %>% 
+  filter(id %in% locat$id[1:9]) %>% 
+  ggplot() +
+  geom_line(aes(time, PM10, col = id)) # omg they are the same!
+
+
+
+cor(d_pair1$PM10[d_pair1$id == locat_sf_training_min1$id[1]],
+    d_pair1$PM10[d_pair1$id == locat_sf_training_min1$id[2]]) 
+
+# work out how to predict from the nearest...
+
+# get distance to nearest for all training data
+locat_sf_training$distance_to_nearest = mins1
+inner_join(d, locat_sf_training)
+
+
+
+# timeseries tests
+summary(targt$time %in% d$time)
+
+```
+
 
 ```{r}
 ## FORMULA ##
 formula = as.formula(PM10 ~  humidity + temperature + (X*Y) + u10 + v10 + tp + dow + hour)
 ```
+
+
 A simple model:
 
 ```{r}
@@ -87,6 +168,84 @@ plot(lm.df$PM10, lm.df$pred)
 cor(lm.df$PM10, lm.df$pred)^2
 ```
 A simple linear model can explain ~19% of the variability in PM10 levels, not great!
+
+
+## Add roads
+
+```{r}
+bb = st_bbox(locat_sf)
+
+```
+
+See www.osm.org for major roads
+
+```{r, eval=FALSE}
+# library(osmdata)
+# osm_data = opq(bbox = bb) %>% 
+#   add_osm_feature(key = "highway", value = "motorway") %>% 
+#   osmdata_sf()
+download.file("http://download.geofabrik.de/europe/germany/nordrhein-westfalen-latest-free.shp.zip", "roads.zip")
+unzip("roads.zip")
+# osm_westfalen_traffic = sf::read_sf("gis_osm_traffic_a_free_1.shp")
+osm_westfalen_transport = sf::read_sf("gis_osm_roads_free_1.shp")
+osm_westfalen_transport
+mapview::mapview(osm_westfalen[1:999, ])
+saveRDS(osm_westfalen_transport, "roads-all.Rds")
+table(osm_westfalen_transport$fclass)
+roads_big = osm_westfalen_transport %>% 
+  filter(grepl(pattern = "motorway|primary|trunk|second|resi", fclass))
+mapview::mapview(roads_big %>% sample_n(100)) +
+  mapview::mapview(locat_sf)
+saveRDS(roads_big, "roads_big.Rds")
+```
+
+```{r}
+roads_big = readRDS("roads_big.Rds")
+table(roads_big$fclass)
+roads_big_class = roads_big %>% 
+  mutate(class = case_when(
+    grepl(pattern = "moto", fclass) ~ 4,
+    grepl(pattern = "prim", fclass) ~ 3,
+    grepl(pattern = "trunk", fclass) ~ 2,
+    grepl(pattern = "sec", fclass) ~ 1,
+    grepl(pattern = "resi", fclass) ~ 0,
+    )) %>% 
+  select(class, maxspeed)
+tm_shape(roads_big_class[1:999, ]) + tm_lines("class") 
+```
+
+Add to point training data
+
+```{r}
+names(d)
+d_buff = stplanr::geo_projected(locat_sf, sf::st_buffer, dist = 500) # note to robin: fix!
+plot(d_buff[1:5, ])
+roads_in_500m = st_intersection(roads_big_class, d_buff)
+saveRDS(roads_in_500m, "roads_in_500m.Rds")
+mapview::mapview(d_buff) +
+  mapview::mapview(roads_in_500m %>% sample_n(500))
+d_roads = st_join(d_buff, roads_in_500m %>% select(-id))
+d_roads
+d_roads_agg = d_roads %>% 
+  st_drop_geometry() %>% 
+  group_by(id) %>% 
+  summarise(
+    mean_speed = mean(maxspeed),
+    n_roads_4 = sum(class == 4),
+    n_roads_3 = sum(class == 3),
+    n_roads_2 = sum(class == 2),
+    n_roads_1 = sum(class == 1),
+    n_roads_0 = sum(class == 0),
+    )
+summary(d_roads_agg)
+nrow(d_roads_agg) == nrow(locat)
+locat_roads = inner_join(locat_sf, d_roads_agg)
+tm_shape(locat_roads) + tm_dots(col = "n_roads_4")
+tm_shape(locat_roads) + tm_dots(col = "n_roads_0")
+length(unique(d))
+```
+
+## Training
 
 Lets try a fancy model: Random Forest
 
@@ -190,61 +349,6 @@ summary(targt$id %in% covar$id)
 summary(targt$id %in% locat$id)
 summary(targt$id %in% wind$monitors.id)
 ```
-
-## Add roads
-
-```{r}
-bb = st_bbox(dsf)
-
-```
-
-See www.osm.org for major roads
-
-```{r, eval=FALSE}
-# library(osmdata)
-# osm_data = opq(bbox = bb) %>% 
-#   add_osm_feature(key = "highway", value = "motorway") %>% 
-#   osmdata_sf()
-download.file("http://download.geofabrik.de/europe/germany/nordrhein-westfalen-latest-free.shp.zip", "roads.zip")
-unzip("roads.zip")
-# osm_westfalen_traffic = sf::read_sf("gis_osm_traffic_a_free_1.shp")
-osm_westfalen_transport = sf::read_sf("gis_osm_roads_free_1.shp")
-osm_westfalen_transport
-mapview::mapview(osm_westfalen[1:999, ])
-saveRDS(osm_westfalen_transport, "roads-all.Rds")
-table(osm_westfalen_transport$fclass)
-roads_big = osm_westfalen_transport %>% 
-  filter(grepl(pattern = "motorway|primary|trunk|second|resi", fclass))
-mapview::mapview(roads_big %>% sample_n(100)) +
-  mapview::mapview(dsf %>% sample_n(100))
-saveRDS(roads_big, "roads_big.Rds")
-```
-
-```{r}
-roads_big = readRDS("roads_big.Rds")
-table(roads_big$fclass)
-roads_big_class = roads_big %>% 
-  mutate(class = case_when(
-    grepl(pattern = "moto", fclass) ~ 4,
-    grepl(pattern = "prim", fclass) ~ 3,
-    grepl(pattern = "trunk", fclass) ~ 2,
-    grepl(pattern = "sec", fclass) ~ 1,
-    grepl(pattern = "resi", fclass) ~ 0,
-    )) %>% 
-  select(class, maxspeed)
-tm_shape(roads_big_class[1:999, ]) + tm_lines("class") 
-```
-
-Add to point training data
-
-```{r}
-names(d)
-nrow(d) == nrow(dsf)
-d_buff = stplanr::geo_projected(dsf, sf::st_buffer, dist = 500)
-plot(d_buff[1:5, ])
-d_buff_main = aggregate()
-```
-
 
 
 
