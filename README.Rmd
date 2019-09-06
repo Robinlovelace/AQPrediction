@@ -30,6 +30,7 @@ suppressPackageStartupMessages({
   library (CAST)
   library(caret)
   library(tmap)
+  library(lubridate)
 })
 tmap_mode("view")
 ```
@@ -43,13 +44,17 @@ covar = readxl::read_excel("SpatialPrediction.xlsx", sheet = 2)
 locat = readxl::read_excel("SpatialPrediction.xlsx", sheet = 3)
 # times = readxl::read_excel("SpatialPrediction.xlsx", sheet = 4) # what is this? -->Their test set. They will use to check our model
 targt = readxl::read_excel("SpatialPrediction.xlsx", sheet = 5)
+# keep only useful vars
+targt = targt %>% select(id, time) %>% 
+  na.omit()
+tail(targt)
 wind = readRDS ("ERA5_24h_uvWind_precip.RDS") ## CHECK if the path is correct.
 ```
 
 The objective is to fill the NA values in the `targt` data:
 
 ```{r}
-targt[1:3]
+targt
 ```
 
 Let's do some data cleaning and plot the data:
@@ -57,11 +62,15 @@ Let's do some data cleaning and plot the data:
 ```{r}
 d = inner_join(train, covar)
 d = inner_join(d, locat)
-d = merge(d, wind, by.x=c("id", "time"), by.y=c("monitors.id", "date")) ### inner_join to join using two columns????
+# d = merge(d, wind, by.x=c("id", "time"), by.y=c("monitors.id", "date")) ### inner_join to join using two columns????
+wind_renamed = wind %>% 
+  rename(id = monitors.id, time = date)
+d = left_join(d, wind_renamed)
 class(d$time)
 d$dow  <- weekdays.POSIXt(d$time) # I included in the wind file
 d$hour <- hour(d$time) # I included in the wind file
 head(d); nrow(d)
+
 
 # dsf = sf::st_as_sf(d, coords = c("X", "Y"), crs = 4326) # ducplicated geometries
 locat_sf = st_as_sf(locat, coords = c("X", "Y"), crs = 4326)
@@ -78,8 +87,10 @@ nrow(locat)
 length(unique(d$id))
 length(unique(targt$id))
 summary(targt$id %in% d$id)
-# targt_locat = inner_join(targt, locat)
-# targt_sf = st_as_sf(targt_joined, coords = c("X", "Y"))
+targt_locat = inner_join(targt, locat)
+targt_joined = left_join(targt_locat, covar)
+targt_joined = left_join(targt_joined, wind_renamed)
+targt_sf = st_as_sf(targt_joined, coords = c("X", "Y"))
 
 nrow(locat_sf)
 locat_sf$is_target = locat_sf$id %in% targt$id
@@ -93,8 +104,8 @@ d_distance_matrix = apply(d_distance_matrix, 1, as.numeric)
 summary(d_distance_matrix[1, ])
 d_distance_matrix[d_distance_matrix == 0] = NA
 mins1 = apply(d_distance_matrix, 1, min, na.rm = TRUE)
-# which_mins1 = apply(d_distance_matrix, 1, which.min)
-# ids_min = locat_sf_training$id[which_mins1]
+which_mins1 = apply(d_distance_matrix, 1, which.min)
+ids_min = locat_sf_training$id[which_mins1]
 # d_nearest_training = st_nearest_feature(locat_sf_training, locat_sf_training)
 
 
@@ -194,7 +205,7 @@ targt_np = targt_sf %>% st_drop_geometry() %>%
 
 i = 5
 # get prediction for all times in test
-test_training1 = d_np %>% filter(id == test_training1$id[i])
+test_training1 = d_np %>% slice(n)
 training_nearest = d_np %>% filter(id == test_training1$id_nearest[i])
 plot(test_training1$time, test_training1$PM10, type = "line", ylim = c(0, 99))
 points(training_nearest$time, training_nearest$PM10)
@@ -233,7 +244,7 @@ for(i in ids_training) {
 
 }
 
-View(d_np)
+# View(d_np)
 cor(d_np$PM10, d_np$PM10_nearest, use = "complete.obs")
 saveRDS(d_np, "d_np.Rds")
 piggyback::pb_upload("d_np.Rds")
@@ -335,12 +346,13 @@ tm_shape(roads_big_class[1:999, ]) + tm_lines("class")
 
 Add to point training data
 
-```{r}
+```{r, eval=FALSE}
 names(d)
 d_buff = stplanr::geo_projected(locat_sf, sf::st_buffer, dist = 500) # note to robin: fix!
 plot(d_buff[1:5, ])
-roads_in_500m = st_intersection(roads_big_class, d_buff)
-saveRDS(roads_in_500m, "roads_in_500m.Rds")
+# roads_in_500m = st_intersection(roads_big_class, d_buff)
+# saveRDS(roads_in_500m, "roads_in_500m.Rds")
+roads_in_500m = readRDS("roads_in_500m.Rds")
 mapview::mapview(d_buff) +
   mapview::mapview(roads_in_500m %>% sample_n(500))
 d_roads = st_join(d_buff, roads_in_500m %>% select(-id))
@@ -359,13 +371,14 @@ d_roads_agg = d_roads %>%
 summary(d_roads_agg)
 nrow(d_roads_agg) == nrow(locat)
 locat_roads = inner_join(locat_sf, d_roads_agg)
+summary(locat_roads)
+
 st_crs(locat_roads) = 4326
 tm_shape(locat_roads) + tm_dots(col = "n_roads_4")
 tm_shape(locat_roads) + tm_dots(col = "n_roads_0")
 tm_shape(locat_roads) + tm_dots(col = "mean_speed")
 summary(locat_roads)
 locat_roads_df = locat_roads %>% st_drop_geometry()
-locat_roads_no_nas = tidyr::replace_na(data = locat_roads_df, replace = 0)
 locat_roads_no_nas = locat_roads_df %>% 
   mutate_at(vars(matches("road|mean_s")), .funs = ~tidyr::replace_na(., 0))
 
@@ -374,9 +387,13 @@ summary(locat_roads_no_nas)
 mapview::mapview(locat_roads)
 length(unique(d))
 
+nrow(targt)
+nrow(targt_np)
+
 targt_npr = left_join(targt_np, locat_roads_no_nas)
 d_npr = left_join(d_np, locat_roads_no_nas)
 d_npr = na.omit(d_npr)
+
 summary(d_npr$mean_speed)
 summary(d_npr$PM10_nearest)
 summary(targt_npr$PM10_nearest)
@@ -388,9 +405,14 @@ cor(d_npr$n_roads_4, d_npr$PM10, use = "complete.obs")
 
 
 names(d_npr)
-n = names(targt_npr)
-n_to_remove = grepl("\\.", n)
-targt_npr = targt_npr[!n_to_remove, ]
+
+# add xy
+targt_xy = locat %>% 
+  select(id, X, Y) 
+# %>% 
+#   mutate(XY)
+targt_npr = left_join(targt_npr, targt_xy)
+
 summary(targt_npr)
 
 saveRDS(d_npr, "d_npr.Rds")
@@ -414,7 +436,7 @@ formula = as.formula(PM10 ~  humidity + temperature + (X*Y) + u10 + v10 + tp + d
 
 A simple model:
 
-```{r}
+```{r, eval=FALSE}
 d = d_npr
 summary(d)
 names(d)
@@ -435,10 +457,10 @@ cor(lm.df$PM10, lm.df$pred)^2
 
 Lets try a fancy model: Random Forest
 
-```{r}
+```{r, eval=FALSE}
 ##\\RANDOM FOREST//##
 
-tunegrid = expand.grid(.mtry=c(3), .splitrule = "variance", .min.node.size = c(5))
+tunegrid = expand.grid(.mtry=c(6), .splitrule = "variance", .min.node.size = c(5))
 
 #@ mtry = 3 (Number of variables to possibly split at in each node. Default is the (rounded down) square root of the number variables).
 #@ min.node.size = 5  (Minimal node size. Default 1 for classification, 5 for regression, 3 for survival, and 10 for probability).
@@ -458,7 +480,7 @@ ranger.model
 #5.989361  0.882534  3.577604
 
 ## CV TYPE SPACE
-space.cv = CreateSpacetimeFolds(d, spacevar = "id")
+space.cv = CreateSpacetimeFolds(d, spacevar = "id", k = 10)
   
 ranger.space = caret::train (formula, 
                                 data= d, 
@@ -467,7 +489,7 @@ ranger.space = caret::train (formula,
                                 num.trees = 50,
                                 tuneGrid=tunegrid,
                                 trControl=trainControl(method="cv", index = space.cv$index,
-                                                      number=10, allowParallel = TRUE))
+                                                      allowParallel = TRUE))
 
 ranger.space 
 #  RMSE     Rsquared   MAE     
@@ -480,7 +502,7 @@ summary(lm.space)
 
 
 ##CV TYPE TIME
-time.cv = CreateSpacetimeFolds(d, spacevar = "time")
+time.cv = CreateSpacetimeFolds(d, spacevar = "time", k = 10)
   
 ranger.time = caret::train (formula, 
                                 data= d, 
@@ -489,7 +511,7 @@ ranger.time = caret::train (formula,
                                 num.trees = 50,
                                 tuneGrid=tunegrid,
                                 trControl=trainControl(method="cv", index = time.cv$index,
-                                                      number=10, allowParallel = TRUE))
+                                                      allowParallel = TRUE))
                                                       
 ranger.time
 #  RMSE      Rsquared   MAE     
@@ -501,7 +523,7 @@ lm.time = lm(PM10 ~ pred, data=time.df)
 summary(lm.time)
 
 ## CV TYPE SPACE-TIME 
-spacetime.cv = CreateSpacetimeFolds(d, spacevar = "id",timevar ="time")
+spacetime.cv = CreateSpacetimeFolds(d, spacevar = "id",timevar ="time", k = 10)
   
 ranger.spacetime = caret::train (formula, 
                                 data= d, 
@@ -510,7 +532,7 @@ ranger.spacetime = caret::train (formula,
                                 num.trees = 50,
                                 tuneGrid=tunegrid,
                                 trControl=trainControl(method="cv", index = spacetime.cv$index,
-                                                      number=10, allowParallel = TRUE))
+                                                      allowParallel = TRUE))
                                                       
 ranger.spacetime
 #  RMSE      Rsquared   MAE     
@@ -524,10 +546,11 @@ summary(lm.spacetime)
 
 To get the result let's see what is in the target table:
 
-```{r}
-targt_joined = inner_join(targt, locat)
-targt_joined = inner_join(targt_joined, covar)
-targt_joined = merge(targt_joined, wind, by.x=c("id", "time"), by.y=c("monitors.id", "date")) ## inner_join to join using two columns????
+```{r, eval=FALSE}
+# targt_joined = inner_join(targt, locat)
+# targt_joined = inner_join(targt_joined, covar)
+# targt_joined = merge(targt_joined, wind, by.x=c("id", "time"), by.y=c("monitors.id", "date")) ## inner_join to join using two columns????
+targt_joined = targt_npr
 
 summary(targt_joined)
 summary(targt$id %in% d$id)
@@ -543,11 +566,53 @@ summary(targt$id %in% wind$monitors.id)
 
 Now we can predict the missing values:
 
-```{r}
-p = predict(ranger.spacetime, newdata = targt_joined)
+```{r, eval=FALSE}
+names(d)
+
+summary(targt_npr)
+
+targt_npr_no_na = targt_npr %>% 
+  mutate_at(vars(matches("tp|ho|v|u|era")), .funs = ~tidyr::replace_na(., mean(.)))
+
+targt_no_na = targt_npr %>% na.omit()
+
+
+p = predict(ranger.model, newdata = targt_npr_no_na)
 summary(p)
-write.csv(data.frame(p = p), "p.csv")
+targt_no_na$p = p
+
+targt_min1 = targt_npr %>% select(id, time)
+targt_min2 = targt_no_na %>% select(id, time, p)
+targt_final = left_join(targt_min1, targt_min2)
+summary(targt_final$p)
+summary(unique(targt_final$id))
+nrow(targt_final)
+
+write.csv(targt_final, "p.csv")
+length(p)
+piggyback::pb_upload("p.csv")
+
+# testing
+targt_final = readr::read_csv("p.csv")
+res_sf = targt_final %>% 
+  group_by(id) %>% 
+  summarise(PM10 = mean(p, na.rm = T))
+res_sf = inner_join(res_sf, locat) %>% 
+  st_as_sf(coords = c("X", "Y"))
+
+library(raster)
+library(gstat)
+ras = raster::raster(x = res_sf, ncols = 100, nrows = 100)
+
+
+g = gstat(formula = PM10 ~ 1, locations = res_sf)
+r_idw = raster::interpolate(ras, g)
+png("ras.png")
+plot(r_idw)
+dev.off()
 ```
+
+![](ras.png)
 
 ```{r, echo=FALSE}
 # system.time(x = 1:1e9)
