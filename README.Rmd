@@ -37,6 +37,7 @@ tmap_mode("view")
 And read-in the input data as follows
 
 ```{r, warning=FALSE, message=FALSE}
+piggyback::pb_upload("SpatialPrediction.xlsx")
 train = readxl::read_excel("SpatialPrediction.xlsx", sheet = 1)
 covar = readxl::read_excel("SpatialPrediction.xlsx", sheet = 2)
 locat = readxl::read_excel("SpatialPrediction.xlsx", sheet = 3)
@@ -94,7 +95,7 @@ d_distance_matrix[d_distance_matrix == 0] = NA
 mins1 = apply(d_distance_matrix, 1, min, na.rm = TRUE)
 # which_mins1 = apply(d_distance_matrix, 1, which.min)
 # ids_min = locat_sf_training$id[which_mins1]
-d_nearest_training = st_nearest_feature(locat_sf_training, locat_sf_training)
+# d_nearest_training = st_nearest_feature(locat_sf_training, locat_sf_training)
 
 
 
@@ -136,12 +137,79 @@ cor(d_pair1$PM10[d_pair1$id == locat_sf_training_min1$id[1]],
 
 # get distance to nearest for all training data
 locat_sf_training$distance_to_nearest = mins1
-inner_join(d, locat_sf_training)
+# inner_join(d, locat_sf_training)
+locat_sf_training$id_nearest = NA
+i = 1
+for(i in 1:nrow(locat_sf_training)) {
+  nearest_point = min(d_distance_matrix[i, ], na.rm = TRUE)
+  index_nearest = which(d_distance_matrix[, i] == nearest_point)
+  locat_sf_training$id_nearest[i] = locat_sf_training$id[index_nearest]
+}
+locat_sf_training %>% select(id, id_nearest)
 
+# check on random numbers
+n = 26
+mapview::mapview(rbind(
+  locat_sf_training %>% slice(n),
+  locat_sf_training %>% filter(id == locat_sf_training$id_nearest[n])
+))
+
+# now calculate distance for target
+d_distance_matrix = st_distance(locat_sf_targt, locat_sf_training)
+d_distance_matrix = apply(d_distance_matrix, 1, as.numeric)
+summary(d_distance_matrix[1, ])
+d_distance_matrix[d_distance_matrix == 0] = NA
+mins1 = apply(d_distance_matrix, 2, min, na.rm = TRUE)
+summary(mins1)
+length(mins1) == nrow(locat_sf_targt)
+locat_sf_targt$distance_to_nearest = mins1
+
+dim(d_distance_matrix)
+i = 1
+locat_sf_targt$id_nearest = NA
+for(i in 1:nrow(locat_sf_targt)) {
+  nearest_point = min(d_distance_matrix[, i], na.rm = TRUE)
+  index_nearest = which(d_distance_matrix[, i] == nearest_point)
+  locat_sf_targt$id_nearest[i] = locat_sf_training$id[index_nearest]
+}
+
+n = 2
+nearest_to_test = locat_sf_training %>% 
+  filter(id == locat_sf_targt$id_nearest[n])
+mapview::mapview(rbind(
+  locat_sf_targt %>% slice(n),
+  nearest_to_test
+))
 
 
 # timeseries tests
 summary(targt$time %in% d$time)
+names(locat_sf_targt)
+
+# joining distance + id to training + target vars
+names(d)
+d_np = inner_join(d, locat_sf_training)
+targt_np = targt_sf %>% st_drop_geometry() %>% 
+  inner_join(., locat_sf_targt)
+
+i = 5
+# get prediction for all times in test
+test_training1 = d_np %>% filter(id == test_training1$id[i])
+training_nearest = d_np %>% filter(id == test_training1$id_nearest[i])
+plot(test_training1$time, test_training1$PM10, type = "line", ylim = c(0, 99))
+points(training_nearest$time, training_nearest$PM10)
+test_training1_joined = inner_join(
+  test_training1,
+  training_nearest %>% select(time, PM10_nearest = PM10),
+  
+)
+summary(test_training1_joined$PM10_nearest)
+test_training1_joined$PM10_nearest = imputeTS::na_interpolation(x = test_training1_joined$PM10_nearest)
+
+
+plot(test_training1$time, test_training1$PM10, type = "line", ylim = c(0, 99))
+points(test_training1_joined$time, test_training1_joined$PM10_nearest)
+
 
 ```
 
