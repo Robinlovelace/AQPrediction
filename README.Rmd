@@ -130,8 +130,8 @@ d %>%
 
 
 
-cor(d_pair1$PM10[d_pair1$id == locat_sf_training_min1$id[1]],
-    d_pair1$PM10[d_pair1$id == locat_sf_training_min1$id[2]]) 
+# cor(d_pair1$PM10[d_pair1$id == locat_sf_training_min1$id[1]],
+#     d_pair1$PM10[d_pair1$id == locat_sf_training_min1$id[2]]) 
 
 # work out how to predict from the nearest...
 
@@ -206,11 +206,62 @@ test_training1_joined = inner_join(
 summary(test_training1_joined$PM10_nearest)
 test_training1_joined$PM10_nearest = imputeTS::na_interpolation(x = test_training1_joined$PM10_nearest)
 
-
 plot(test_training1$time, test_training1$PM10, type = "line", ylim = c(0, 99))
 points(test_training1_joined$time, test_training1_joined$PM10_nearest)
 
+# For loop to find nearest
+d_np$PM10_nearest = NA
+ids_training = unique(unique(d_np$id))
+i = ids_training[22]
+for(i in ids_training) {
+  test_training1 = d_np %>% filter(id == i)
+  training_nearest = d_np %>% filter(id == test_training1$id_nearest[1])
+  test_training1_joined = left_join(
+  test_training1,
+  training_nearest %>% select(time, PM10_n = PM10)
+  )
+  if(sum(!is.na(test_training1_joined$PM10_n)) > 2 ){
+      test_training1_joined$PM10_nearest = imputeTS::na_interpolation(x = test_training1_joined$PM10_n)
 
+  d_np$PM10_nearest[d_np$id == i] = test_training1_joined$PM10_nearest 
+  
+  plot(d_np$time[d_np$id == i], d_np$PM10[d_np$id == i], type = "line")
+  points(d_np$time[d_np$id == i], d_np$PM10_nearest[d_np$id == i])
+  } else {
+    message("Skipping id", i)
+  }
+
+}
+
+View(d_np)
+cor(d_np$PM10, d_np$PM10_nearest, use = "complete.obs")
+saveRDS(d_np, "d_np.Rds")
+piggyback::pb_upload("d_np.Rds")
+
+# For loop to find nearest in target
+targt_np$PM10_nearest = NA
+ids_training = unique(unique(targt_np$id))
+i = ids_training[22]
+for(i in ids_training) {
+  test_training1 = targt_np %>% filter(id == i)
+  training_nearest = d_np %>% filter(id == test_training1$id_nearest[1])
+  test_training1_joined = left_join(
+  test_training1,
+  training_nearest %>% select(time, PM10_n = PM10)
+  )
+  if(sum(!is.na(test_training1_joined$PM10_n)) > 2 ){
+      test_training1_joined$PM10_nearest = imputeTS::na_interpolation(x = test_training1_joined$PM10_n)
+
+  targt_np$PM10_nearest[targt_np$id == i] = test_training1_joined$PM10_nearest 
+  
+  plot(targt_np$time[targt_np$id == i], targt_np$PM10_nearest[targt_np$id == i])
+  } else {
+    message("Skipping id", i)
+  }
+
+}
+saveRDS(targt_np, "targt_np.Rds")
+piggyback::pb_upload("targt_np.Rds")
 ```
 
 
@@ -308,12 +359,79 @@ d_roads_agg = d_roads %>%
 summary(d_roads_agg)
 nrow(d_roads_agg) == nrow(locat)
 locat_roads = inner_join(locat_sf, d_roads_agg)
+st_crs(locat_roads) = 4326
 tm_shape(locat_roads) + tm_dots(col = "n_roads_4")
 tm_shape(locat_roads) + tm_dots(col = "n_roads_0")
+tm_shape(locat_roads) + tm_dots(col = "mean_speed")
+summary(locat_roads)
+locat_roads_df = locat_roads %>% st_drop_geometry()
+locat_roads_no_nas = tidyr::replace_na(data = locat_roads_df, replace = 0)
+locat_roads_no_nas = locat_roads_df %>% 
+  mutate_at(vars(matches("road|mean_s")), .funs = ~tidyr::replace_na(., 0))
+
+summary(locat_roads_no_nas)
+
+mapview::mapview(locat_roads)
 length(unique(d))
+
+targt_npr = left_join(targt_np, locat_roads_no_nas)
+d_npr = left_join(d_np, locat_roads_no_nas)
+d_npr = na.omit(d_npr)
+summary(d_npr$mean_speed)
+summary(d_npr$PM10_nearest)
+summary(targt_npr$PM10_nearest)
+cor(d_npr$n_roads_0, d_npr$PM10, use = "complete.obs")
+cor(d_npr$n_roads_1, d_npr$PM10, use = "complete.obs")
+cor(d_npr$n_roads_2, d_npr$PM10, use = "complete.obs")
+cor(d_npr$n_roads_3, d_npr$PM10, use = "complete.obs")
+cor(d_npr$n_roads_4, d_npr$PM10, use = "complete.obs")
+
+
+names(d_npr)
+n = names(targt_npr)
+n_to_remove = grepl("\\.", n)
+targt_npr = targt_npr[!n_to_remove, ]
+summary(targt_npr)
+
+saveRDS(d_npr, "d_npr.Rds")
+saveRDS(targt_npr, "targt_npr.Rds")
+piggyback::pb_upload("d_npr.Rds")
+piggyback::pb_upload("targt_npr.Rds")
 ```
 
 ## Training
+
+Start with a linear model:
+
+
+```{r}
+## FORMULA ##
+formula = as.formula(PM10 ~  humidity + temperature + (X*Y) + u10 + v10 + tp + dow + hour +
+                       + distance_to_nearest + PM10_nearest + mean_speed +
+                       n_roads_4 + n_roads_3 + n_roads_2 + n_roads_1 + n_roads_0)
+```
+
+
+A simple model:
+
+```{r}
+d = d_npr
+summary(d)
+names(d)
+
+##\\LINEAR//##
+m = lm(formula, data = d)
+## Are all the predictors significant? Let's check!
+summary(m)
+
+lm.df = d
+lm.df$pred = predict(m, newdata = lm.df)
+lm.random = lm(PM10 ~ pred, data=lm.df)
+summary(lm.random)
+plot(lm.df$PM10, lm.df$pred)
+cor(lm.df$PM10, lm.df$pred)^2
+```
+
 
 Lets try a fancy model: Random Forest
 
